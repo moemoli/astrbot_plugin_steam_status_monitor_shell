@@ -22,7 +22,7 @@ async def handle_steam_list(self, event, *, font_path: Optional[str] = None, **_
         if not status:
             user_list.append({
                 'sid': sid,
-                'name': sid,
+                'name': self.get_group_card_name(group_id, sid, sid),
                 'status': 'error',
                 'avatar_url': '',
                 'game': '',
@@ -31,7 +31,7 @@ async def handle_steam_list(self, event, *, font_path: Optional[str] = None, **_
                 'lastlogoff': None
             })
             continue
-        name = status.get('name') or sid
+        name = self.get_group_card_name(group_id, sid, status.get('name') or sid)
         gameid = status.get('gameid')
         game = status.get('gameextrainfo')
         lastlogoff = status.get('lastlogoff')

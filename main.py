@@ -82,6 +82,20 @@ class SteamStatusMonitorV2(Star):
                         self.group_recent_games[group_id] = json.load(f)
             except Exception as e:
                 logger.warning(f"加载 group_recent_games 失败: {e} (group_id={group_id})")
+            try:
+                path = self._get_group_data_path(group_id, "steam_qq_map")
+                if os.path.exists(path):
+                    with open(path, "r", encoding="utf-8") as f:
+                        self.group_steam_qq[group_id] = json.load(f)
+            except Exception as e:
+                logger.warning(f"加载 group_steam_qq 失败: {e} (group_id={group_id})")
+            try:
+                path = self._get_group_data_path(group_id, "member_cards")
+                if os.path.exists(path):
+                    with open(path, "r", encoding="utf-8") as f:
+                        self.group_member_cards[group_id] = json.load(f)
+            except Exception as e:
+                logger.warning(f"加载 group_member_cards 失败: {e} (group_id={group_id})")
 
     def _save_persistent_data(self):
         # 分群保存各群的状态数据
@@ -122,6 +136,18 @@ class SteamStatusMonitorV2(Star):
                     json.dump(self.group_recent_games.get(group_id, []), f, ensure_ascii=False)
             except Exception as e:
                 logger.warning(f"保存 group_recent_games 失败: {e} (group_id={group_id})")
+            try:
+                path = self._get_group_data_path(group_id, "steam_qq_map")
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(self.group_steam_qq.get(group_id, {}), f, ensure_ascii=False)
+            except Exception as e:
+                logger.warning(f"保存 group_steam_qq 失败: {e} (group_id={group_id})")
+            try:
+                path = self._get_group_data_path(group_id, "member_cards")
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(self.group_member_cards.get(group_id, {}), f, ensure_ascii=False)
+            except Exception as e:
+                logger.warning(f"保存 group_member_cards 失败: {e} (group_id={group_id})")
 
     def _load_notify_session(self):
         path = os.path.join(self.data_dir, "notify_sessions.json")
@@ -256,6 +282,105 @@ class SteamStatusMonitorV2(Star):
             else:
                 logger.warning(f"无效的映射配置格式: {mapping}，应为 'SteamID|群号'")
 
+    def get_group_card_name(self, group_id, steam_id, default_name=None):
+        """获取玩家在群内的名片（如果有），否则返回 default_name 或 steam_id"""
+        qq_map = self.group_steam_qq.get(group_id, {})
+        qq_id = qq_map.get(steam_id)
+        if qq_id:
+            cards = self.group_member_cards.get(group_id, {})
+            card = cards.get(qq_id)
+            if card:
+                if default_name:
+                    return f"{card} ({default_name})"
+                return card
+        return default_name or steam_id
+
+    async def update_group_cards_loop(self):
+        """每天定时更新群名片"""
+        while True:
+            try:
+                await asyncio.sleep(10) # 启动后延迟
+                if not self.group_steam_qq:
+                    await asyncio.sleep(86400)
+                    continue
+                
+                # 寻找可用作 API 调用的 Bot/Platform 实例
+                bots = []
+                
+                # 1. 尝试从 platform_manager 获取
+                pm = getattr(self.context, 'platform_manager', None)
+                if pm:
+                    if hasattr(pm, 'get_insts') and callable(pm.get_insts):
+                        bots.extend(pm.get_insts())
+                    elif hasattr(pm, 'platform_insts'):
+                        pi = pm.platform_insts
+                        if isinstance(pi, list):
+                            bots.extend(pi)
+                        elif isinstance(pi, dict):
+                            bots.extend(pi.values())
+                
+                # 2. 尝试从 context.adapter 获取
+                adapter = getattr(self.context, 'adapter', None)
+                if adapter and adapter not in bots:
+                    bots.append(adapter)
+                    if hasattr(adapter, 'bot'):
+                        bots.append(adapter.bot)
+
+                # 筛选出有 get_group_member_info 方法或 call_api 方法的实例
+                capable_bots = []
+                for b in bots:
+                    if hasattr(b, 'get_group_member_info') or hasattr(b, 'call_api'):
+                        capable_bots.append(b)
+                    elif hasattr(b, 'bot') and (hasattr(b.bot, 'get_group_member_info') or hasattr(b.bot, 'call_api')):
+                        capable_bots.append(b.bot)
+                
+                if not capable_bots:
+                    # 避免刷屏，仅在第一次失败时提示或静默
+                    await asyncio.sleep(86400)
+                    continue
+
+                logger.info(f"[名片更新] 开始更新 {sum(len(m) for m in self.group_steam_qq.values())} 个账号的名片")
+
+                # 遍历所有群和QQ映射
+                count = 0
+                for group_id, mapping in self.group_steam_qq.items():
+                    for steam_id, qq_id in mapping.items():
+                        success = False
+                        for bot in capable_bots:
+                            try:
+                                info = None
+                                if hasattr(bot, 'get_group_member_info'):
+                                    info = await bot.get_group_member_info(group_id=group_id, user_id=qq_id, no_cache=True)
+                                elif hasattr(bot, 'call_api'):
+                                    info = await bot.call_api('get_group_member_info', group_id=group_id, user_id=qq_id, no_cache=True)
+                                
+                                if info:
+                                    data = info.get('data', info) if isinstance(info, dict) else info
+                                    name = None
+                                    if isinstance(data, dict):
+                                        name = data.get('card') or data.get('nickname') or data.get('member_name')
+                                    else:
+                                        name = getattr(data, 'card', None) or getattr(data, 'member_name', None) or getattr(data, 'nickname', None)
+                                    
+                                    if name:
+                                        self.group_member_cards.setdefault(group_id, {})[qq_id] = name
+                                        count += 1
+                                        success = True
+                                        break
+                            except Exception:
+                                pass
+                        
+                        await asyncio.sleep(0.5)
+                        
+                if count > 0:
+                    self._save_persistent_data()
+                    logger.info(f"[名片更新] 本轮更新结束，已更新 {count} 个名片")
+            except Exception as e:
+                logger.error(f"[SteamStatusMonitor] 群名片更新循环异常: {e}")
+            
+            # 每天更新一次
+            await asyncio.sleep(86400)
+
     def __init__(self, context: Context, config=None):
         # 插件运行状态标志，重启后自动丢失
         if hasattr(self, '_ssm_running') and self._ssm_running:
@@ -272,6 +397,8 @@ class SteamStatusMonitorV2(Star):
         self.group_pending_logs = {}      # {group_id: {steamid: {gameid: log_dict}}}
         self.group_recent_games = {}      # {group_id: [gameid, ...]}
         self.group_pending_quit = {}      # {group_id: {steamid: {gameid: {quit_time, name, game_name, duration_min, start_time, notified}}}}
+        self.group_steam_qq = {}          # {group_id: {steamid: qqid}}
+        self.group_member_cards = {}      # {group_id: {qqid: card_name}}
         # 超能力缓存和能力列表
         self._superpower_cache = {}  # {(steamid, date): superpower}
         self._abilities = None
@@ -343,6 +470,7 @@ class SteamStatusMonitorV2(Star):
         self._last_round_logs = []  # [(group_id, logstr)]
         asyncio.create_task(self.global_poll_and_log_loop())
         asyncio.create_task(self.init_poll_time_once())
+        asyncio.create_task(self.update_group_cards_loop())
         # SGDB API Key 可在 https://www.steamgriddb.com/profile/preferences/api 获取
         self.SGDB_API_KEY = self.config.get('sgdb_api_key', '')
 
@@ -350,8 +478,9 @@ class SteamStatusMonitorV2(Star):
         '''插件启动后10秒内进行一次全员初始化轮询，设置每个SteamID的next_poll_time，并输出一次初始日志'''
         await asyncio.sleep(10)
         all_logs = []
-        for group_id in self.group_steam_ids:
-            steam_ids = self.group_steam_ids[group_id]
+        # 使用 list() 创建副本，防止迭代期间字典变更
+        for group_id in list(self.group_steam_ids.keys()):
+            steam_ids = self.group_steam_ids.get(group_id, [])
             group_lines = []
             for sid in steam_ids:
                 msg = await self.check_status_change(group_id, single_sid=sid)
@@ -791,34 +920,76 @@ class SteamStatusMonitorV2(Star):
         yield event.plain_result("本群Steam状态监控启动完成喔！ヾ(≧ω≦)ゞ")
 
     @filter.command("steam addid")
-    async def steam_addid(self, event: AstrMessageEvent, steamid: str):
-        '''添加SteamID到本群监控列表（分群），支持多个ID用逗号分隔'''
+    async def steam_addid(self, event: AstrMessageEvent, steamid: str, qq: str = None):
+        '''添加SteamID到本群监控列表，支持指定QQ号以显示群名片（/steam addid [steamid] [qq]），支持多个ID用点号分隔'''
+        steamid = str(steamid)
+        if qq:
+            qq = str(qq)
         group_id = str(event.get_group_id()) if hasattr(event, 'get_group_id') else 'default'
-        # 支持多个ID同时输入
-        steamid_list = [x.strip() for x in steamid.split(".") if x.strip()]
+        
+        pairs = [] # (sid, qq_id)
+        if qq:
+            pairs.append((steamid.strip(), qq.strip()))
+        else:
+            raw_list = [x.strip() for x in steamid.split(".") if x.strip()]
+            for item in raw_list:
+                if ':' in item:
+                    sid, q = item.split(':', 1)
+                    pairs.append((sid.strip(), q.strip()))
+                else:
+                    pairs.append((item, None))
+        
+        steamid_list = [p[0] for p in pairs]
         invalid_ids = [sid for sid in steamid_list if not sid.isdigit() or len(sid) != 17]
         if invalid_ids:
             yield event.plain_result(f"以下SteamID无效（需为64位数字串，17位）：{'.'.join(invalid_ids)}")
             return
+        
         steam_ids = self.group_steam_ids.setdefault(group_id, [])
         added = []
         already = []
+        mapped_qq = []
         limit = self.max_group_size
-        for sid in steamid_list:
+        
+        for sid, qqid in pairs:
             if sid in steam_ids:
                 already.append(sid)
+                if qqid:
+                    self.group_steam_qq.setdefault(group_id, {})[sid] = qqid
+                    mapped_qq.append(sid)
             elif len(steam_ids) < limit:
                 steam_ids.append(sid)
                 added.append(sid)
+                if qqid:
+                    self.group_steam_qq.setdefault(group_id, {})[sid] = qqid
+                    mapped_qq.append(sid)
             else:
                 break
+        
         self.group_steam_ids[group_id] = steam_ids
-        self._save_group_steam_ids()  # 新增：保存到 steam_groups.json
+        self._save_group_steam_ids()
+        self._save_persistent_data()
+
         msg = ""
         if added:
             msg += f"已为本群添加SteamID: {'.'.join(added)}\n"
         if already:
             msg += f"以下SteamID已存在于本群监控组: {'.'.join(already)}\n"
+        if mapped_qq:
+            msg += f"已更新 {len(mapped_qq)} 个账号的QQ映射。\n"
+            # 尝试立即更新名片
+            try:
+                for sid in mapped_qq:
+                    qqid = self.group_steam_qq[group_id][sid]
+                    info = await self.context.get_group_member_info(group_id, qqid)
+                    if info:
+                        name = info.card or info.nickname
+                        if name:
+                            self.group_member_cards.setdefault(group_id, {})[qqid] = name
+                self._save_persistent_data()
+            except Exception:
+                pass
+
         if len(steam_ids) >= limit and len(added) < len(steamid_list):
             msg += f"本群监控组人数已达上限（{limit}人），部分ID未添加。\n"
         yield event.plain_result(msg.strip() if msg else "未添加任何SteamID。")
@@ -833,8 +1004,80 @@ class SteamStatusMonitorV2(Star):
             return
         steam_ids.remove(steamid)
         self.group_steam_ids[group_id] = steam_ids
+        
+        if group_id in self.group_steam_qq and steamid in self.group_steam_qq[group_id]:
+            del self.group_steam_qq[group_id][steamid]
+            self._save_persistent_data()
+            
         self._save_group_steam_ids()  # 新增：保存到 steam_groups.json
         yield event.plain_result(f"已为本群删除SteamID: {steamid}")
+
+    @filter.command("steam bind")
+    async def steam_bind(self, event: AstrMessageEvent, steamid: str, qq: str):
+        '''将已添加的SteamID与QQ号绑定，以便显示群名片（/steam bind [steamid] [qq]）'''
+        steamid = str(steamid).strip()
+        qq = str(qq).strip()
+        group_id = str(event.get_group_id()) if hasattr(event, 'get_group_id') else 'default'
+        
+        steam_ids = self.group_steam_ids.get(group_id, [])
+        if steamid not in steam_ids:
+            yield event.plain_result(f"SteamID {steamid} 未在本群监控列表中，请先使用 /steam addid 添加。")
+            return
+            
+        self.group_steam_qq.setdefault(group_id, {})[steamid] = qq
+        self._save_persistent_data()
+        
+        # 尝试立即更新名片
+        try:
+            # 复用 update_group_cards_loop 中的查找逻辑 (简化版)
+            # 或者直接让下一次 loop 更新。为了即时反馈，简单尝试一下。
+            bots = []
+            pm = getattr(self.context, 'platform_manager', None)
+            if pm:
+                if hasattr(pm, 'get_insts') and callable(pm.get_insts):
+                    bots.extend(pm.get_insts())
+                elif hasattr(pm, 'platform_insts'):
+                    pi = pm.platform_insts
+                    if isinstance(pi, list):
+                        bots.extend(pi)
+                    elif isinstance(pi, dict):
+                        bots.extend(pi.values())
+            adapter = getattr(self.context, 'adapter', None)
+            if adapter and adapter not in bots:
+                bots.append(adapter)
+                
+            capable_bots = []
+            for b in bots:
+                if hasattr(b, 'get_group_member_info') or hasattr(b, 'call_api'):
+                    capable_bots.append(b)
+                elif hasattr(b, 'bot') and (hasattr(b.bot, 'get_group_member_info') or hasattr(b.bot, 'call_api')):
+                    capable_bots.append(b.bot)
+            
+            for bot in capable_bots:
+                info = None
+                if hasattr(bot, 'get_group_member_info'):
+                    info = await bot.get_group_member_info(group_id=group_id, user_id=qq, no_cache=True)
+                elif hasattr(bot, 'call_api'):
+                    info = await bot.call_api('get_group_member_info', group_id=group_id, user_id=qq, no_cache=True)
+                
+                if info:
+                    data = info.get('data', info) if isinstance(info, dict) else info
+                    name = None
+                    if isinstance(data, dict):
+                        name = data.get('card') or data.get('nickname') or data.get('member_name')
+                    else:
+                        name = getattr(data, 'card', None) or getattr(data, 'member_name', None) or getattr(data, 'nickname', None)
+                    
+                    if name:
+                        self.group_member_cards.setdefault(group_id, {})[qq] = name
+                        self._save_persistent_data()
+                        yield event.plain_result(f"绑定成功！已获取名片：{name}")
+                        return
+        except Exception as e:
+            logger.warning(f"绑定时获取名片失败: {e}")
+            pass
+        
+        yield event.plain_result(f"已将 SteamID {steamid} 绑定到 QQ {qq} (名片将在下次自动更新时获取)。")
 
     @filter.command("steam list")
     async def steam_list(self, event: AstrMessageEvent):
@@ -1180,8 +1423,10 @@ class SteamStatusMonitorV2(Star):
                     zh_game_name, en_game_name = await self.get_game_names(gameid, info["game_name"])
                     print(f"[get_game_names] zh_game_name={zh_game_name}, en_game_name={en_game_name}")
                     font_path = self.get_font_path('NotoSansHans-Regular.otf')
+                    # 优先使用 image_name (仅名片) 渲染图片
+                    render_name = info.get("image_name", info["name"])
                     img_bytes = await render_game_end(
-                        self.data_dir, sid, info["name"], avatar_url, gameid, zh_game_name,
+                        self.data_dir, sid, render_name, avatar_url, gameid, zh_game_name,
                         end_time_str, tip_text, duration_h, sgdb_api_key=self.SGDB_API_KEY, font_path=font_path, sgdb_game_name=en_game_name, appid=gameid
                     )
                     import tempfile
@@ -1220,7 +1465,14 @@ class SteamStatusMonitorV2(Star):
             if not status:
                 continue
             prev = last_states.get(sid)
-            name = status.get('name') or sid
+            raw_steam_name = status.get('name') or sid
+            name = self.get_group_card_name(group_id, sid, raw_steam_name)
+            # 专为图片渲染准备的名称（仅名片）
+            qq_map = self.group_steam_qq.get(group_id, {})
+            qq_id = qq_map.get(sid)
+            card = self.group_member_cards.get(group_id, {}).get(qq_id) if qq_id else None
+            image_name = card if card else raw_steam_name
+            
             gameid = status.get('gameid')
             game = status.get('gameextrainfo')
             lastlogoff = status.get('lastlogoff')
@@ -1254,6 +1506,7 @@ class SteamStatusMonitorV2(Star):
                 pending_quit[sid][prev_gameid] = {
                     "quit_time": now,
                     "name": name,
+                    "image_name": image_name,
                     "game_name": zh_prev_game_name,
                     "duration_min": duration_min,
                     "start_time": start_time,
@@ -1331,8 +1584,10 @@ class SteamStatusMonitorV2(Star):
                         online_count = await self.get_game_online_count(current_gameid)
                         # 获取英文名用于 sgdb_game_name
                         zh_game_name, en_game_name = await self.get_game_names(current_gameid, zh_game_name)
+                        # 优先使用 image_name (仅名片) 渲染图片
+                        render_name = image_name if image_name else name
                         img_bytes = await render_game_start(
-                            self.data_dir, sid, name, avatar_url, current_gameid, zh_game_name,
+                            self.data_dir, sid, render_name, avatar_url, current_gameid, zh_game_name,
                             api_key=self.API_KEY, superpower=superpower, sgdb_api_key=self.SGDB_API_KEY,
                             font_path=font_path, sgdb_game_name=en_game_name, online_count=online_count, appid=gameid
                         )
@@ -1531,7 +1786,7 @@ class SteamStatusMonitorV2(Star):
             next_poll = self.next_poll_time.get(group_id, {})
             for sid in steam_ids:
                 status = last_states.get(sid)
-                name = status.get('name') if status else sid
+                name = self.get_group_card_name(group_id, sid, status.get('name') if status else sid)
                 gameid = status.get('gameid') if status else None
                 game = status.get('gameextrainfo') if status else None
                 lastlogoff = status.get('lastlogoff') if status else None
