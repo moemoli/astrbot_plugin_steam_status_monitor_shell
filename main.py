@@ -341,10 +341,20 @@ class SteamStatusMonitorV2(Star):
 
                 logger.info(f"[名片更新] 开始更新 {sum(len(m) for m in self.group_steam_qq.values())} 个账号的名片")
 
-                # 遍历所有群和QQ映射
+                # 遍历所有群和QQ映射 (使用 list 创建副本，防止迭代期间字典变更)
                 count = 0
-                for group_id, mapping in self.group_steam_qq.items():
-                    for steam_id, qq_id in mapping.items():
+                # 复制群ID列表
+                group_ids = list(self.group_steam_qq.keys())
+                
+                for group_id in group_ids:
+                    # 获取当前群的映射副本
+                    current_mapping = self.group_steam_qq.get(group_id)
+                    if not current_mapping:
+                        continue
+                    # 复制该群的 {steamid: qq} 映射，防止遍历期间被修改
+                    steam_qq_items = list(current_mapping.items())
+                    
+                    for steam_id, qq_id in steam_qq_items:
                         success = False
                         for bot in capable_bots:
                             try:
