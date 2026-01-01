@@ -47,6 +47,19 @@ class SteamStatusMonitorV2(Star):
                         self.group_last_states[group_id] = json.load(f)
             except Exception as e:
                 logger.warning(f"加载 group_last_states 失败: {e} (group_id={group_id})")
+            
+            # 加载监控开关状态
+            try:
+                path = self._get_group_data_path(group_id, "monitor_enabled")
+                if os.path.exists(path):
+                    with open(path, "r", encoding="utf-8") as f:
+                        enabled = json.load(f)
+                        self.group_monitor_enabled[group_id] = enabled
+                        if enabled and group_id not in self.running_groups:
+                            self.running_groups.add(group_id)
+            except Exception as e:
+                logger.warning(f"加载 group_monitor_enabled 失败: {e} (group_id={group_id})")
+
             try:
                 path = self._get_group_data_path(group_id, "start_play_times")
                 if os.path.exists(path):
@@ -106,6 +119,15 @@ class SteamStatusMonitorV2(Star):
                     json.dump(self.group_last_states.get(group_id, {}), f, ensure_ascii=False)
             except Exception as e:
                 logger.warning(f"保存 group_last_states 失败: {e} (group_id={group_id})")
+            
+            # 保存监控开关状态
+            try:
+                path = self._get_group_data_path(group_id, "monitor_enabled")
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(self.group_monitor_enabled.get(group_id, True), f, ensure_ascii=False)
+            except Exception as e:
+                logger.warning(f"保存 group_monitor_enabled 失败: {e} (group_id={group_id})")
+
             try:
                 path = self._get_group_data_path(group_id, "start_play_times")
                 with open(path, "w", encoding="utf-8") as f:
@@ -481,9 +503,9 @@ class SteamStatusMonitorV2(Star):
                     self.running_groups.add(group_id)
         # --- 新增：全局日志收集与统一输出 ---
         self._last_round_logs = []  # [(group_id, logstr)]
-        asyncio.create_task(self.global_poll_and_log_loop())
-        asyncio.create_task(self.init_poll_time_once())
-        asyncio.create_task(self.update_group_cards_loop())
+        self._poll_task = asyncio.create_task(self.global_poll_and_log_loop())
+        self._init_task = asyncio.create_task(self.init_poll_time_once())
+        self._card_task = asyncio.create_task(self.update_group_cards_loop())
         # SGDB API Key 可在 https://www.steamgriddb.com/profile/preferences/api 获取
         self.SGDB_API_KEY = self.config.get('sgdb_api_key', '')
 
@@ -551,6 +573,10 @@ class SteamStatusMonitorV2(Star):
 
     async def terminate(self):
         '''插件被卸载/停用时自动保存持久化数据'''
+        # 停止后台任务
+        if hasattr(self, '_poll_task'): self._poll_task.cancel()
+        if hasattr(self, '_card_task'): self._card_task.cancel()
+        
         self._save_persistent_data()
         # 停止所有成就定时任务
         for task in self.achievement_poll_tasks.values():
@@ -774,6 +800,9 @@ class SteamStatusMonitorV2(Star):
         try:
             while True:
                 await asyncio.sleep(1200)  # 20分钟
+                # 如果监控已关闭，停止轮询
+                if not self.group_monitor_enabled.get(group_id, True):
+                    break
                 # 黑名单跳过
                 if gameid in self.achievement_blacklist:
                     logger.info(f"[成就定时对比] 游戏 {gameid} 已在黑名单，跳过轮询")
@@ -811,6 +840,8 @@ class SteamStatusMonitorV2(Star):
         '''游戏结束后延迟5分钟再做一次成就对比，失败多次自动加入黑名单'''
         key = (group_id, sid, gameid)
         await asyncio.sleep(300)  # 5分钟
+        if not self.group_monitor_enabled.get(group_id, True):
+            return
         # 黑名单跳过
         if gameid in self.achievement_blacklist:
             logger.info(f"[成就结束冗余对比] 游戏 {gameid} 已在黑名单，跳过轮询")
@@ -842,6 +873,8 @@ class SteamStatusMonitorV2(Star):
 
     async def notify_new_achievements(self, group_id, steamid, player_name, gameid, game_name, new_achievements):
         if not self.group_achievement_enabled.get(group_id, True):
+            return
+        if not self.group_monitor_enabled.get(group_id, True):
             return
         if not new_achievements or not self.notify_sessions:
             return
@@ -1396,6 +1429,8 @@ class SteamStatusMonitorV2(Star):
 
     async def _delayed_quit_check(self, group_id, sid, gameid):
         await asyncio.sleep(180)
+        if not self.group_monitor_enabled.get(group_id, True):
+            return
         group_pending = self.group_pending_quit.get(group_id, {})
         info = group_pending.get(sid, {}).get(gameid)
         if info and not info.get("notified"):
@@ -1418,6 +1453,19 @@ class SteamStatusMonitorV2(Star):
                 time_str = f"{duration_min:.1f}分钟"
             else:
                 time_str = f"{duration_min/60:.1f}小时"
+            
+            # 优先使用 image_name (仅名片) 渲染图片
+            render_name = info.get("image_name")
+            if not render_name:
+                # 兼容旧数据或fallback
+                raw = info.get("name", "")
+                if " (" in raw and raw.endswith(")"):
+                    render_name = raw.rsplit(" (", 1)[0]
+                else:
+                    render_name = raw
+            
+            logger.info(f"[Debug Quit] Processing quit: info_name={info.get('name')}, info_image_name={info.get('image_name')}, final_render_name={render_name}")
+
             msg = f"👋 {info['name']} 不玩 {info['game_name']}了\n游玩时间 {time_str}"
             notify_session = getattr(self, 'notify_sessions', {}).get(group_id, None)
             if notify_session:
@@ -1438,7 +1486,14 @@ class SteamStatusMonitorV2(Star):
                     print(f"[get_game_names] zh_game_name={zh_game_name}, en_game_name={en_game_name}")
                     font_path = self.get_font_path('NotoSansHans-Regular.otf')
                     # 优先使用 image_name (仅名片) 渲染图片
-                    render_name = info.get("image_name", info["name"])
+                    render_name = info.get("image_name")
+                    if not render_name:
+                        # 兼容旧数据或fallback：尝试去除自动追加的后缀 " (SteamName)"
+                        raw = info.get("name", "")
+                        if " (" in raw and raw.endswith(")"):
+                            render_name = raw.rsplit(" (", 1)[0]
+                        else:
+                            render_name = raw
                     img_bytes = await render_game_end(
                         self.data_dir, sid, render_name, avatar_url, gameid, zh_game_name,
                         end_time_str, tip_text, duration_h, sgdb_api_key=self.SGDB_API_KEY, font_path=font_path, sgdb_game_name=en_game_name, appid=gameid
@@ -1517,6 +1572,10 @@ class SteamStatusMonitorV2(Star):
                 # 修复 KeyError: 确保 pending_quit[sid] 存在
                 if sid not in pending_quit:
                     pending_quit[sid] = {}
+                
+                # Debug log
+                logger.info(f"[Debug Quit] Writing pending_quit: name={name}, image_name={image_name}, card={card}")
+                
                 pending_quit[sid][prev_gameid] = {
                     "quit_time": now,
                     "name": name,
@@ -1795,7 +1854,9 @@ class SteamStatusMonitorV2(Star):
         lines = []
         now = int(time.time())
         for group_id, steam_ids in self.group_steam_ids.items():
-            lines.append(f"群组: {group_id}")
+            enabled = self.group_monitor_enabled.get(group_id, True)
+            status_text = "已开启" if enabled else "已关闭"
+            lines.append(f"群组: {group_id} ({status_text})")
             last_states = self.group_last_states.get(group_id, {})
             next_poll = self.next_poll_time.get(group_id, {})
             for sid in steam_ids:
