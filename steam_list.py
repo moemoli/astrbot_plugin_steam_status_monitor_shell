@@ -17,8 +17,14 @@ async def handle_steam_list(self, event, *, font_path: Optional[str] = None, **_
     start_play_times = self.group_start_play_times.get(group_id, {})
     user_list = []
     now = int(time.time())
+    
+    # 并发获取所有玩家状态
+    import asyncio
+    tasks = [self.fetch_player_status(sid, retry=1) for sid in steam_ids]
+    results = await asyncio.gather(*tasks)
+    
     for idx, sid in enumerate(steam_ids):
-        status = await self.fetch_player_status(sid, retry=1)
+        status = results[idx]
         if not status:
             user_list.append({
                 'sid': sid,
