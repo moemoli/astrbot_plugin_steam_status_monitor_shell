@@ -54,7 +54,8 @@
 - `/steam alllist` 列出所有群聊分组及玩家状态
 - `/steam config` 查看当前插件配置
 - `/steam set [参数] [值]` 设置配置参数（如 `/steam set poll_interval_sec 30`）
-- `/steam addid [SteamID]` 添加SteamID到本群监控列表，支持英文逗号分隔多个id
+- `/steam addid [SteamID] [QQ号]` 添加监控，可绑定QQ号以显示群名片（如 `/steam addid 76561198xxxxxxxxx 123456789`）
+- `/steam bind [SteamID] [QQ号]` 为已添加的SteamID绑定或更新QQ号
 - `/steam delid [SteamID]` 从本群监控列表删除SteamID
 - `/steam openbox [SteamID]` 查看指定SteamID的全部详细信息
 - `/steam rs` 清除所有状态并初始化（可能不生效）
@@ -76,6 +77,9 @@
 如果显示缺少依赖，你可以尝试下载以下工具来进行修复
 pip install httpx pillow
 
+### 新增配置项
+- `card_update_interval_sec`: 群名片自动更新间隔，默认 86400 秒（24小时）。
+
 可以添加QQ：1912584909 来反馈功能和建议 闲聊也欢迎喵~
 
 ## ⭐ Stars
@@ -83,6 +87,13 @@ pip install httpx pillow
 > 如果本项目对您的生活 / 工作产生了帮助，或者您关注本项目的未来发展，请给项目 Star，这是我维护这个开源项目的动力 ❤️。
 
 ## 更新日志
+
+### v2.2.6
+- 新增群名片显示功能：支持绑定 QQ 号，优先显示群名片。
+- 新增指令 `/steam bind`：用于绑定或更新 SteamID 对应的 QQ 号。
+- 优化 `/steam addid`：支持直接在添加时指定 QQ 号。
+- 优化图片渲染：游戏开始/结束图片将只显示群名片（如有），界面更清爽。
+- 性能优化：`/steam list` 列表查询改为并发执行，响应速度大幅提升。
 
 ### v2.1.9
 - 新增 `steam_group_mapping` 配置项，支持通过配置文件预设 SteamID 与群号的映射关系
