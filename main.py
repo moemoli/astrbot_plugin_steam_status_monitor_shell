@@ -39,7 +39,11 @@ class SteamStatusMonitorV2(Star):
 
     def _load_persistent_data(self):
         # 分群加载各群的状态数据
-        for group_id in self.group_steam_ids:
+        groups_to_load = set(self.group_steam_ids.keys())
+        if hasattr(self, 'notify_sessions'):
+            groups_to_load.update(self.notify_sessions.keys())
+
+        for group_id in groups_to_load:
             try:
                 path = self._get_group_data_path(group_id, "states")
                 if os.path.exists(path):
@@ -476,12 +480,14 @@ class SteamStatusMonitorV2(Star):
         self.data_dir = str(astrbot.core.star.StarTools.get_data_dir("steam_status_monitor"))
         os.makedirs(self.data_dir, exist_ok=True)
         self._load_group_steam_ids()
-        self._load_persistent_data()
-        self._load_notify_session()
 
         steam_group_mapping = self.config.get('steam_group_mapping', [])
         if steam_group_mapping:
             self._process_steam_group_mapping(steam_group_mapping)
+
+        self._load_notify_session()
+        self._load_persistent_data()
+
         # 成就监控
         self.achievement_monitor = AchievementMonitor(self.data_dir)
         self.achievement_monitor.enable_failure_blacklist = self.enable_failure_blacklist
@@ -500,7 +506,21 @@ class SteamStatusMonitorV2(Star):
             logger.info(f"[SteamStatusMonitor] 检测到 notify_sessions={self.notify_sessions}，自动启动监控轮询")
             for group_id in self.notify_sessions:
                 if group_id in self.group_steam_ids:
-                    self.running_groups.add(group_id)
+                    # 双重检查：确保 monitor_enabled 状态已正确加载
+                    if group_id not in self.group_monitor_enabled:
+                        try:
+                            path = self._get_group_data_path(group_id, "monitor_enabled")
+                            if os.path.exists(path):
+                                with open(path, "r", encoding="utf-8") as f:
+                                    self.group_monitor_enabled[group_id] = json.load(f)
+                        except Exception:
+                            pass
+                    
+                    # 仅当监控未被关闭时才启动
+                    if self.group_monitor_enabled.get(group_id, True):
+                        self.running_groups.add(group_id)
+                    else:
+                        logger.info(f"[SteamStatusMonitor] 群 {group_id} 监控已关闭，跳过自动启动")
         # --- 新增：全局日志收集与统一输出 ---
         self._last_round_logs = []  # [(group_id, logstr)]
         self._poll_task = asyncio.create_task(self.global_poll_and_log_loop())
@@ -928,6 +948,16 @@ class SteamStatusMonitorV2(Star):
         '''手动启动Steam状态监控轮询（分群）'''
         group_id = str(event.get_group_id()) if hasattr(event, 'get_group_id') else 'default'
         self.group_monitor_enabled[group_id] = True
+        
+        # 显式保存该群的 monitor_enabled
+        try:
+            path = self._get_group_data_path(group_id, "monitor_enabled")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(True, f, ensure_ascii=False)
+        except Exception as e:
+            logger.warning(f"保存 group_monitor_enabled 失败: {e} (group_id={group_id})")
+
+        self._save_persistent_data()  # 立即保存状态
         if not self.API_KEY:
             yield event.plain_result("未配置 Steam API Key，请先在插件配置中填写 steam_api_key。")
             return
@@ -1251,6 +1281,16 @@ class SteamStatusMonitorV2(Star):
         self.group_monitor_enabled[group_id] = False
         if group_id in self.running_groups:
             self.running_groups.remove(group_id)
+        
+        # 显式保存该群的 monitor_enabled，确保即使 group_steam_ids 异常也能保存配置
+        try:
+            path = self._get_group_data_path(group_id, "monitor_enabled")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(False, f, ensure_ascii=False)
+        except Exception as e:
+            logger.warning(f"保存 group_monitor_enabled 失败: {e} (group_id={group_id})")
+
+        self._save_persistent_data()  # 立即保存状态
         yield event.plain_result(f"已为本群关闭Steam监控和推送。")
 
     @filter.permission_type(filter.PermissionType.ADMIN)
