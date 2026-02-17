@@ -437,6 +437,10 @@ class SteamStatusMonitorV2(Star):
         self.group_pending_quit = {}      # {group_id: {steamid: {gameid: {quit_time, name, game_name, duration_min, start_time, notified}}}}
         self.group_steam_qq = {}          # {group_id: {steamid: qqid}}
         self.group_member_cards = {}      # {group_id: {qqid: card_name}}
+        # 启停与推送开关（需在持久化加载前初始化）
+        self.running_groups = set()            # 正在运行的群号集合
+        self.group_monitor_enabled = {}        # {group_id: bool} 监控开关
+        self.group_achievement_enabled = {}    # {group_id: bool} 成就推送开关
         # 超能力缓存和能力列表
         self._superpower_cache = {}  # {(steamid, date): superpower}
         self._abilities = None
@@ -497,10 +501,6 @@ class SteamStatusMonitorV2(Star):
         self.achievement_blacklist = set()  # 新增：成就查询黑名单
         self.achievement_fail_count = {}    # 新增：成就查询失败计数
         self._recent_start_notify = {}
-        # --- 新增：重启后自动推送 ---
-        self.running_groups = set()  # 正在运行的群号集合
-        self.group_monitor_enabled = {}      # {group_id: bool} 监控开关
-        self.group_achievement_enabled = {}  # {group_id: bool} 成就推送开关
         # --- 新增：重启后自动恢复所有群的轮询 ---
         if hasattr(self, 'notify_sessions') and self.notify_sessions and self.API_KEY and self.group_steam_ids:
             logger.info(f"[SteamStatusMonitor] 检测到 notify_sessions={self.notify_sessions}，自动启动监控轮询")
