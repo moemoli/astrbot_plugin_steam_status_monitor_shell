@@ -1822,9 +1822,8 @@ class SteamStatusMonitorV2(Star):
                         # 获取英文名用于 sgdb_game_name
                         zh_game_name, en_game_name = await self.get_game_names(current_gameid, zh_game_name)
                         # 优先使用 image_name (仅名片) 渲染图片
-                        render_name = image_name if image_name else name
                         img_bytes = await render_game_start(
-                            self.data_dir, sid, render_name, avatar_url, current_gameid, zh_game_name,
+                            self.data_dir, sid, raw_steam_name, avatar_url, current_gameid, zh_game_name,
                             api_key=self.API_KEY, superpower=superpower, sgdb_api_key=self.SGDB_API_KEY,
                             font_path=font_path, sgdb_game_name=en_game_name, online_count=online_count, appid=gameid
                         )
@@ -1976,7 +1975,7 @@ class SteamStatusMonitorV2(Star):
                                 print(f"[get_game_names] zh_game_name={zh_game_name}, en_game_name={en_game_name}")
                                 font_path = self.get_font_path('NotoSansHans-Regular.otf')
                                 img_bytes = await render_game_end(
-                                    self.data_dir, sid, info["name"], avatar_url, gameid, zh_game_name,
+                                    self.data_dir, sid, raw_steam_name, avatar_url, gameid, zh_game_name,
                                     end_time_str, tip_text, duration_min/60 if duration_min > 0 else 0, sgdb_api_key=self.SGDB_API_KEY, font_path=font_path, sgdb_game_name=en_game_name, appid=gameid
                                 )
                                 import tempfile
