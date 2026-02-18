@@ -32,10 +32,10 @@ VANITY_ID_RE = re.compile(r"steamcommunity\.com/id/([^/]+)/?", re.I)
 
 @register(
     "steam_status_monitor_shell",
-    "Shell",
+    "Moemoli",
     "Steam状态监控插件",
-    "2.2.6",
-    "https://github.com/Gezhe14/astrbot_plugin_steam_status_monitor_shell"
+    "2.2.7",
+    "https://github.com/moemoli/astrbot_plugin_steam_status_monitor_shell"
 )
 class SteamStatusMonitorV2(Star):
     async def _resolve_to_steamid64(self, raw: str):
