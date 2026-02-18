@@ -25,6 +25,11 @@ import traceback
 import shutil
 from .superpower_util import load_abilities, get_daily_superpower  # 新增导入
 
+
+STEAMID64_BASE = 76561197960265728
+PROFILE_ID_RE = re.compile(r"steamcommunity\.com/profiles/(\d{17})", re.I)
+VANITY_ID_RE = re.compile(r"steamcommunity\.com/id/([^/]+)/?", re.I)
+
 @register(
     "steam_status_monitor_shell",
     "Shell",
@@ -33,6 +38,75 @@ from .superpower_util import load_abilities, get_daily_superpower  # 新增导�
     "https://github.com/Gezhe14/astrbot_plugin_steam_status_monitor_shell"
 )
 class SteamStatusMonitorV2(Star):
+    async def _resolve_to_steamid64(self, raw: str):
+        raw = str(raw or "").strip()
+        if not raw:
+            return None, "目标为空。"
+
+        if raw.isdigit() and len(raw) == 17:
+            return raw, None
+
+        profile_match = PROFILE_ID_RE.search(raw)
+        if profile_match:
+            return profile_match.group(1), None
+
+        # Steam 好友码（account id，通常 <= 10 位纯数字）
+        if raw.isdigit() and len(raw) <= 10:
+            try:
+                return str(int(raw) + STEAMID64_BASE), None
+            except Exception:
+                return None, "好友码无效。"
+
+        vanity_match = VANITY_ID_RE.search(raw)
+        if vanity_match:
+            vanity = vanity_match.group(1)
+            return await self._resolve_vanity(vanity)
+
+        if raw.startswith("http://") or raw.startswith("https://"):
+            return await self._resolve_short_url(raw)
+
+        # Fallback: treat as vanity id
+        return await self._resolve_vanity(raw)
+
+    async def _resolve_vanity(self, vanity: str):
+        vanity = str(vanity or "").strip().strip("/")
+        if not vanity:
+            return None, "自定义链接为空。"
+        if not getattr(self, "API_KEY", ""):
+            return None, "解析自定义链接需要 Steam Web API Key（steam_api_key）。"
+
+        url = "https://api.steampowered.com/ISteamUser/ResolveVanityURL/v0001/"
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(url, params={"key": self.API_KEY, "vanityurl": vanity})
+                resp.raise_for_status()
+                data = resp.json().get("response", {})
+        except Exception:
+            return None, "自定义链接解析失败。"
+
+        if data.get("success") == 1 and data.get("steamid"):
+            return str(data.get("steamid")), None
+        return None, "无法解析自定义链接。"
+
+    async def _resolve_short_url(self, url: str):
+        url = str(url or "").strip()
+        if not url:
+            return None, "链接为空。"
+        try:
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+                resp = await client.get(url)
+                final_url = str(resp.url)
+        except Exception:
+            return None, "短链接解析失败。"
+
+        profile_match = PROFILE_ID_RE.search(final_url)
+        if profile_match:
+            return profile_match.group(1), None
+        vanity_match = VANITY_ID_RE.search(final_url)
+        if vanity_match:
+            return await self._resolve_vanity(vanity_match.group(1))
+        return None, "链接未解析到 Steam 个人主页。"
+
     def _get_group_data_path(self, group_id, key):
         """获取分群数据文件路径"""
         return os.path.join(self.data_dir, f"group_{group_id}_{key}.json")
@@ -996,30 +1070,58 @@ class SteamStatusMonitorV2(Star):
         yield event.plain_result("本群Steam状态监控启动完成喔！ヾ(≧ω≦)ゞ")
 
     @filter.command("steam addid")
-    async def steam_addid(self, event: AstrMessageEvent, steamid: str, qq: str = None):
+    async def steam_addid(self, event: AstrMessageEvent, steamid: str | None = None, qq: str | None = None):
         '''添加SteamID到本群监控列表，支持指定QQ号以显示群名片（/steam addid [steamid] [qq]），支持多个ID用点号分隔'''
-        steamid = str(steamid)
+        steamid = str(steamid or "").strip()
         if qq:
-            qq = str(qq)
+            qq = str(qq).strip()
+        else:
+            qq = event.get_sender_id()
+        if not steamid:
+            yield event.plain_result("用法：/steam addid <steamid64|profile_url|vanity|friend_code> [qq]\n支持多个ID用点号分隔；也支持单个 URL/自定义链接/好友码解析。")
+            return
         group_id = str(event.get_group_id()) if hasattr(event, 'get_group_id') else 'default'
         
         pairs = [] # (sid, qq_id)
         if qq:
-            pairs.append((steamid.strip(), qq.strip()))
+            pairs.append((steamid, qq))
         else:
-            raw_list = [x.strip() for x in steamid.split(".") if x.strip()]
+            # 兼容旧语法：用点号分隔多个条目；条目可选 "目标:qq"
+            # 但 URL 内部包含 '.' 和 ':'，因此遇到 URL 时按单条处理。
+            if "steamcommunity.com" in steamid.lower() or "://" in steamid:
+                raw_list = [steamid]
+            else:
+                raw_list = [x.strip() for x in steamid.split(".") if x.strip()]
+
             for item in raw_list:
-                if ':' in item:
-                    sid, q = item.split(':', 1)
-                    pairs.append((sid.strip(), q.strip()))
-                else:
+                if not item:
+                    continue
+                if "://" in item:
                     pairs.append((item, None))
-        
-        steamid_list = [p[0] for p in pairs]
-        invalid_ids = [sid for sid in steamid_list if not sid.isdigit() or len(sid) != 17]
-        if invalid_ids:
-            yield event.plain_result(f"以下SteamID无效（需为64位数字串，17位）：{'.'.join(invalid_ids)}")
+                    continue
+                target = item
+                qqid = None
+                if item.count(":") == 1:
+                    left, right = item.rsplit(":", 1)
+                    # 仅当右侧像 QQ 号时，才视为绑定语法，避免误伤其它输入
+                    if right.isdigit() and 5 <= len(right) <= 12:
+                        target, qqid = left.strip(), right.strip()
+                pairs.append((target.strip(), qqid))
+
+        resolved_pairs = []  # (steamid64, qq_id)
+        invalid_targets = []
+        for target, qqid in pairs:
+            sid, err = await self._resolve_to_steamid64(target)
+            if not sid or not sid.isdigit() or len(sid) != 17:
+                invalid_targets.append(f"{target}（{err or '无法解析'}）")
+                continue
+            resolved_pairs.append((sid, qqid))
+
+        if invalid_targets:
+            yield event.plain_result("以下目标无法解析为 SteamID64（17位数字）：\n" + "\n".join(f"- {x}" for x in invalid_targets))
             return
+
+        steamid_list = [p[0] for p in resolved_pairs]
         
         steam_ids = self.group_steam_ids.setdefault(group_id, [])
         added = []
@@ -1027,7 +1129,7 @@ class SteamStatusMonitorV2(Star):
         mapped_qq = []
         limit = self.max_group_size
         
-        for sid, qqid in pairs:
+        for sid, qqid in resolved_pairs:
             if sid in steam_ids:
                 already.append(sid)
                 if qqid:
